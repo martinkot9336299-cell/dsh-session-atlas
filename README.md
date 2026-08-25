@@ -16,7 +16,7 @@ DeepSeek Harness（DSH）的非线性对话地图：把会话画成一张可缩�
 ## 安装
 
 ```bash
-dsh plugin --profile web add github:<你的用户名>/dsh-session-atlas
+dsh plugin --profile web add github:martinkot9336299-cell/dsh-session-atlas
 ```
 
 （或本地路径 `dsh plugin --profile web add /path/to/dsh-session-atlas`）
