@@ -8,9 +8,6 @@
         dataFile: !!js dshHomePath('session-atlas/workspaces.json')
         autoProjection: true
         projectionWorkspaceTitle: DSH 任务
-        # Context Graph layer: graph-events / graph-snapshot default to the
-        # dataFile directory; graphLayer: false disables the layer entirely.
-        graphLayer: true
         # Extra authorities the Host check accepts (host or host:port);
         # localhost and 127.0.0.1 are always allowed.
         trustedHosts: []

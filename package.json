@@ -1,7 +1,7 @@
 {
   "name": "dsh-session-atlas",
-  "version": "0.1.0",
-  "description": "会话地图 for DeepSeek Harness — non-linear conversation map: one complete turn per card, branchable DAG, docked turn inspector, live growth, upstream-parity rendering. Extracted from the dsh-synapse lineage.",
+  "version": "0.2.0",
+  "description": "会话地图 for DeepSeek Harness — turn the conversation waterfall into a navigable map: one complete turn per card, branchable DAG, live growth, docked turn inspector. Pure map, no context-graph extras.",
   "type": "module",
   "main": "index.js",
   "exports": {
@@ -15,10 +15,7 @@
     "client.js",
     "cordis.patch.yml",
     "README.md",
-    "LICENSE",
-    "graph/core.mjs",
-    "graph/facts.mjs",
-    "graph/store.mjs"
+    "LICENSE"
   ],
   "scripts": {
     "build": "node --check index.js && node --check client.js",

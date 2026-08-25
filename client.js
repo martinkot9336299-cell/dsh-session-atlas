@@ -202,20 +202,12 @@ window.__ModuleLoader__.load({
       loading: snapshot === null, error: '', activeSessionId: null,
       filterText: '', compact: false, compareCardIds: [], detailThreadId: null, detailCardId: null, pinned: [], pickerSessions: [], pickerOpen: false,
       focusNonce: 0, composerCardId: null, branchDraftCardId: null, liveText: null, liveReceiving: false, watchLive: null, stale: snapshot !== null, optimisticNonce: 0, sizeNonce: 0, pendingBranch: null, newDraftOpen: false, pendingNewSession: null,
-      // v0.2 图层（Phase 2）：merged graph + 突变反馈 + 浮层开关
-      graph: null, graphNonce: 0, refToast: '', refPreviewOpen: false, matDraftOpen: false,
       // Phase 4 D3：项目切换器（官方工作区只读）
       wsItems: [], wsTitle: null, projectAuto: true, projectSheetOpen: false,
     })
-    // 图脏标记：图突变不经过 workspaces.json 的 version 通道，主动置脏并立即拉取
-    let graphDirty = false
-    const pullNowSet = new Set()
-    const pullAllNow = () => { for (const pullNow of [...pullNowSet]) { try { pullNow() } catch { /* unmounted */ } } }
-    const markGraphDirty = () => { graphDirty = true; pullAllNow() }
     // 挂载期未显式切换过 → 跟随设备形态设默认（旋转/改窗口不回退用户选择）
     if (synStore.get().userCompactToggled !== true) synStore.set({ compact: prefersCompactDefault() })
 
-    // 每个 SynapseView 实例各注册自己的立即重拉函数；双入口并存时不能用单例句柄，
     // 否则任一实例卸载都会把另一个仍存活实例的刷新能力清空。
     let lastWorkspaceKey = ''
     let lastKnownVersion = -1
@@ -986,7 +978,7 @@ window.__ModuleLoader__.load({
       )
     }
 
-    function SynapseCanvas({ threads, activeSessionId, filterText, onFilterChange, compact, onToggleCompact, compareCardIds, onToggleCompare, onOpenDetail, onMoreCard, onOpenCompare, onOpenPicker, focusNonce, inspectCardId, composerCardId, branchDraftCardId, liveText, liveReceiving, watchLive, onOpenComposer, onOpenBranchDraft, onConfirmBranchDraft, optimisticNonce, sizeNonce, pendingBranch, newDraftOpen, onOpenNewDraft, onConfirmNewSession, onToggleExpand, expandedNonce, graph, onReference, onOpenRefPreview, onArchiveMaterial, onOpenMatDraft, wsTitle, onOpenProjectSheet, syncing }) {
+    function SynapseCanvas({ threads, activeSessionId, filterText, onFilterChange, compact, onToggleCompact, compareCardIds, onToggleCompare, onOpenDetail, onMoreCard, onOpenCompare, onOpenPicker, focusNonce, inspectCardId, composerCardId, branchDraftCardId, liveText, liveReceiving, watchLive, onOpenComposer, onOpenBranchDraft, onConfirmBranchDraft, optimisticNonce, sizeNonce, pendingBranch, newDraftOpen, onOpenNewDraft, onConfirmNewSession, onToggleExpand, expandedNonce, wsTitle, onOpenProjectSheet, syncing }) {
       const [tidyTick, setTidyTick] = useState(0)
       // optimisticNonce：乐观用户消息 Map 变化时让 cards 重算（新问轮卡立即出现）
       const cards = useMemo(() => conversationCards(threads), [threads, optimisticNonce, sizeNonce, tidyTick])
@@ -1028,75 +1020,6 @@ window.__ModuleLoader__.load({
           .map(c => ({ key: c.id, fromId: c.parentId, toId: c.id, d: connectorPath(byId.get(c.parentId), c) }))
       }, [visibleCards])
       const inspectPath = useMemo(() => ancestorPathOf(cards, inspectCardId), [cards, inspectCardId])
-      // —— v0.2 图层（Phase 2）：卡片↔图节点映射 / 材料卡 / 引用连线 ——
-      const graphLayer = useMemo(() => {
-        const none = { matCards: [], refConnectors: [], latestActiveNodeId: null, activeRefEdges: [], staleCardIds: new Set(), staleNodeByCardId: new Map() }
-        if (graph == null) return none
-        const turnIndex = turnNodesOf(graph)
-        const real = visibleCards.filter(c => c.collapsed === undefined)
-        const cardByNodeId = new Map()
-        for (const card of real) {
-          const nodeId = nodeIdForCard(card, graph, threads, turnIndex)
-          if (nodeId != null && !cardByNodeId.has(nodeId)) cardByNodeId.set(nodeId, card)
-        }
-        const matCards = Object.values(graph.nodes)
-          .filter(node => node.type !== 'turn' && node.status !== 'archived')
-          .map((node, index) => ({
-            id: `mat:${node.id}`, matId: node.id, isMaterial: true,
-            question: node.title ?? '材料', matContent: node.content ?? '',
-            threadId: null, turnIndex: -1, dshSessionId: null, parentId: null, sourceSeq: undefined,
-            pos: node.position ?? { x: 86, y: 82 - (index + 1) * 200 },
-            estH: 130,
-          }))
-        const matByNodeId = new Map(matCards.map(c => [c.matId, c]))
-        // 端点解析：直接映射 → 材料卡 → （turn 节点无卡时，例如 goal_round 轮被
-        // 投影当噪音过滤）同会话 sourceSeq 不大于节点 seq 的最后一张卡 → 会话末卡。
-        // 两端退化到同一张卡时放弃该线（无视觉意义）。
-        const cardsBySession = new Map()
-        for (const card of real) {
-          if (card.dshSessionId == null) continue
-          const list = cardsBySession.get(card.dshSessionId) ?? []
-          list.push(card); cardsBySession.set(card.dshSessionId, list)
-        }
-        for (const list of cardsBySession.values()) list.sort((a, b) => (a.sourceSeq ?? -1) - (b.sourceSeq ?? -1))
-        const endpointCard = nodeId => {
-          const direct = cardByNodeId.get(nodeId) ?? matByNodeId.get(nodeId)
-          if (direct != null) return direct
-          const node = graph.nodes[nodeId]
-          if (node == null || node.sessionId == null) return null
-          const list = cardsBySession.get(node.sessionId)
-          if (list == null || list.length === 0) return null
-          const withSeq = list.filter(c => Number.isInteger(c.sourceSeq))
-          if (withSeq.length === 0) return list.at(-1)
-          const before = withSeq.filter(c => c.sourceSeq <= node.seq)
-          const after = withSeq.filter(c => c.sourceSeq > node.seq)
-          const nearBefore = before.at(-1)
-          const nearAfter = after[0]
-          if (nearBefore == null) return nearAfter
-          if (nearAfter == null) return nearBefore
-          return (node.seq - nearBefore.sourceSeq) <= (nearAfter.sourceSeq - node.seq) ? nearBefore : nearAfter
-        }
-        const refEdges = Object.values(graph.edges).filter(e => e.mode === 'reference')
-        const refConnectors = []
-        for (const edge of refEdges) {
-          const from = endpointCard(edge.from)
-          const to = endpointCard(edge.to)
-          if (from == null || to == null || from.id === to.id) continue
-          refConnectors.push({ key: `ref:${edge.id}`, fromId: from.id, toId: to.id, d: connectorPath(from, to) })
-        }
-        const latestNodes = turnIndex.get(activeSessionId)
-        const latestActiveNodeId = latestNodes != null && latestNodes.length > 0 ? latestNodes[latestNodes.length - 1].id : null
-        const activeRefEdges = latestActiveNodeId == null ? [] : refEdges.filter(e => e.to === latestActiveNodeId)
-        // Phase 3：过期卡集合（与引用线同一端点回退——goal_round 轮无卡时落到邻卡）
-        const staleCardIds = new Set()
-        const staleNodeByCardId = new Map()
-        for (const node of Object.values(graph.nodes)) {
-          if (node.status !== 'stale') continue
-          const card = endpointCard(node.id)
-          if (card != null) { staleCardIds.add(card.id); staleNodeByCardId.set(card.id, node.id) }
-        }
-        return { matCards, refConnectors, latestActiveNodeId, activeRefEdges, staleCardIds, staleNodeByCardId }
-      }, [graph, visibleCards, threads, activeSessionId])
       const [menuOpen, setMenuOpen] = useState(false)
       const focusActiveRef = useRef(null)
       const draftParentId = pendingBranch?.parentCardId ?? branchDraftCardId
@@ -1394,15 +1317,6 @@ window.__ModuleLoader__.load({
               document.removeEventListener('pointercancel', stop)
               card.classList.remove('syn-card--dragging')
               clearGuides(viewportRef.current)
-              if (cardId.startsWith('mat:')) {
-                // 材料卡位置存宿主图事件（NODE_PATCHED），跨设备跟随
-                const matId = cardId.slice(4)
-                void api(`/session-atlas/api/graph/nodes/${encodeURIComponent(matId)}`, {
-                  method: 'PATCH',
-                  body: JSON.stringify({ position: { x: Math.round(position.x), y: Math.round(position.y) } }),
-                }).catch(() => { /* 断网等：下次拖动再存 */ })
-                return
-              }
               cardPositions.set(cardId, { x: Math.round(position.x), y: Math.round(position.y) })
               persistCardPositions()
             }
@@ -1703,13 +1617,6 @@ window.__ModuleLoader__.load({
           `${cards.length} 张卡 · ${compact === true ? '精简' : '全量'}`,
           h('span', { className: 'syn-focuschip__swap' }, compact === true ? '看全部' : '看精简'),
         ),
-        // v0.2：当前会话的引用就绪条——有引用边指向生长点时出现，点击看预览
-        graphLayer.activeRefEdges.length > 0 ? h('button', {
-          className: 'syn-refbar', onClick: onOpenRefPreview, title: '查看将随下一条消息注入的引用上下文',
-        },
-          h('span', { className: 'syn-refbar__icon', 'aria-hidden': true }, '⎇'),
-          `已引用 ${graphLayer.activeRefEdges.length} 项 · 下一条消息生效`,
-        ) : null,
         menuOpen ? h('div', { className: 'syn-sheet-scrim', onClick: () => setMenuOpen(false) }) : null,
         menuOpen ? h('div', { className: 'syn-sheet' },
           h('div', { className: 'syn-sheet__title' }, '画布操作'),
@@ -1717,7 +1624,6 @@ window.__ModuleLoader__.load({
           h('button', { onClick: () => { setMenuOpen(false); onOpenNewDraft() } }, '✎ 新建会话'),
           h('button', { onClick: () => { setMenuOpen(false); fitView() } }, '⤢ 看全图'),
           h('button', { onClick: () => { setMenuOpen(false); focusActive() } }, '⌖ 定位到当前会话'),
-          h('button', { onClick: () => { setMenuOpen(false); onOpenMatDraft() } }, '⎇ 添加材料卡片'),
           h('button', { onClick: () => { setMenuOpen(false); onToggleCompact() } }, compact === true ? '⊙ 看全部轮次' : '⊖ 精简：每链只看最近 3 轮'),
           compareCardIds.length === 2 ? h('button', { onClick: () => { setMenuOpen(false); onOpenCompare() } }, '◫ 对比选中的两张卡片') : null,
           h('button', { onClick: () => { setMenuOpen(false); tidyLayout() } }, '⌗ 整理布局'),
@@ -1737,12 +1643,6 @@ window.__ModuleLoader__.load({
                 inspectPath == null ? '' : inspectPath.has(c.fromId) && inspectPath.has(c.toId) ? 'syn-connector--path' : 'syn-connector--offpath',
               ].filter(Boolean).join(' ') || undefined,
               ref: el => { if (el !== null) dragApi.registerPath(connectorKey(visibleCards, c.key), el) },
-            })),
-            // v0.2 引用线：虚线 + 引用色；拖动跟随与实线同一刷新机制（from->to 键）
-            graphLayer.refConnectors.map(c => h('path', {
-              key: c.key, d: c.d, markerEnd: 'url(#syn-arrow)',
-              className: 'syn-connector--ref' + (dimSet !== null && (dimSet.has(c.fromId) || dimSet.has(c.toId)) ? ' syn-dim' : '') + (inspectPath != null ? ' syn-connector--offpath' : ''),
-              ref: el => { if (el !== null) dragApi.registerPath(`${c.fromId}->${c.toId}`, el) },
             })),
 
             draftParent != null && draftPos != null ? h('path', { className: 'syn-connector--draft', d: connectorPath(draftParent, { pos: draftPos, size: { w: CARD_WIDTH, h: CARD_HEIGHT } }), markerEnd: 'url(#syn-arrow)' }) : null,
@@ -1794,7 +1694,6 @@ window.__ModuleLoader__.load({
                   : null
               return h(ThreadCard, {
                 key: card.id, card,
-                stale: graphLayer.staleCardIds.has(card.id),
                 // active = 当前会话的「生长点」（最末一张），不是会话内全部卡——
                 // 否则作用域地图里整条链常亮、回复钮满屏，视觉噪音；
                 // 被观看的新分支生长点同样给 active（相机聚焦与视觉锚点都落在它身上）
@@ -1819,35 +1718,6 @@ window.__ModuleLoader__.load({
                 onCollapseThread: collapseThread,
               })
             }),
-            // v0.2 材料卡：图自有节点（material/note/summary/artifact）上画布
-            graphLayer.matCards.map(card => h('div', {
-              key: card.id,
-              className: 'syn-card syn-card--mat',
-              style: { left: `${card.pos.x}px`, top: `${card.pos.y}px` },
-              ref: el => { if (el !== null) dragApi.registerCard(card.id, { current: el }) },
-            },
-              h('button', {
-                className: 'syn-card__handle', title: '拖动卡片', 'aria-label': '拖动卡片',
-                onPointerDown: e => dragApi?.startDrag(e, card.id),
-              }, '···'),
-              h('div', { className: 'syn-card__head' },
-                h('span', { className: 'syn-chip syn-chip--mat' }, '材'),
-                h('span', { className: 'syn-card__title' }, card.question),
-              ),
-              card.matContent !== '' ? h('div', { className: 'syn-card__matbody' },
-                card.matContent.length > 140 ? `${card.matContent.slice(0, 140)}…` : card.matContent,
-              ) : null,
-              h('footer', { className: 'syn-card__foot' },
-                h('button', {
-                  className: 'syn-card__btn syn-card__btn--ref', title: '引用到当前会话：随你的下一条消息注入一次',
-                  onClick: e => { e.stopPropagation(); onReference(card.matId, card.question) },
-                }, '⎇ 引用'),
-                h('button', {
-                  className: 'syn-card__btn', title: '删除材料卡',
-                  onClick: e => { e.stopPropagation(); onArchiveMaterial(card.matId) },
-                }, '删除'),
-              ),
-            )),
           ),
         ),
       )
@@ -1889,37 +1759,6 @@ window.__ModuleLoader__.load({
       return card?.parentId !== null ? `${card.parentId}->${cardId}` : cardId
     }
 
-    // —— v0.2 图层共享映射：图 turn 节点按会话索引 / 卡片 → 图节点 ——
-    const turnNodesOf = graph => {
-      const bySession = new Map()
-      if (graph == null) return bySession
-      for (const node of Object.values(graph.nodes)) {
-        if (node.type !== 'turn' || !node.sessionId) continue
-        const list = bySession.get(node.sessionId) ?? []
-        list.push(node); bySession.set(node.sessionId, list)
-      }
-      for (const list of bySession.values()) list.sort((a, b) => a.seq - b.seq)
-      return bySession
-    }
-    const nodeIdForCard = (card, graph, threads, turnIndex) => {
-      if (graph == null || card == null || !Number.isInteger(card.sourceSeq) || card.dshSessionId == null) return null
-      let sid = card.dshSessionId
-      // 继承轮（fork 种子内的历史轮）：图节点挂在来源会话名下
-      if (Number.isSafeInteger(card.seedLength) && card.sourceSeq < card.seedLength) {
-        const parentThread = (threads ?? []).find(t => t.id === card.sourceParentId)
-        if (parentThread?.dshSessionId == null) return null
-        sid = parentThread.dshSessionId
-      }
-      const nodes = (turnIndex ?? turnNodesOf(graph)).get(sid)
-      if (nodes == null) return null
-      const node = nodes.find(n => n.seq >= card.sourceSeq)
-      return node?.id ?? null
-    }
-    const latestNodeIdOf = (graph, sessionId) => {
-      if (graph == null || sessionId == null) return null
-      const nodes = turnNodesOf(graph).get(sessionId)
-      return nodes != null && nodes.length > 0 ? nodes[nodes.length - 1].id : null
-    }
 
 
     function SynapseView({ ctx }) {
@@ -1983,22 +1822,6 @@ window.__ModuleLoader__.load({
               .filter(id => id != null && (pinned.includes(id) || sessionIds.includes(id) || id === pendingId || (currentAllowed && id === currentId)))
             const threads = visible.length > 0 ? await pullThreads(ctx, visible) : []
             if (stopped) return
-            // v0.2 图层：凡到达此处 = version 变化或强拉（图派生自会话，随动刷新）；
-            // JSON 去抖避免同拍重复 set；旧宿主无图 API 时静默禁用图功能。
-            // Phase 4 D2：带 workspaceId 走项目视图过滤（材料全局可见；编译/注入/过期
-            // 仍在服务端走全量图，语义不变）。
-            graphDirty = false
-            try {
-              const g = await api(key !== '' ? `/session-atlas/api/graph?workspaceId=${encodeURIComponent(key)}` : '/session-atlas/api/graph')
-              if (stopped) return
-              const nextGraph = g?.graph ?? null
-              if (nextGraph !== null) {
-                const last = synStore.get().graph
-                if (last === null || JSON.stringify(last) !== JSON.stringify(nextGraph)) {
-                  synStore.set(st => ({ graph: nextGraph, graphNonce: (st.graphNonce ?? 0) + 1 }))
-                }
-              }
-            } catch { /* 旧宿主无图 API：图功能静默禁用 */ }
             try { lastKnownVersion = (await api('/session-atlas/api/version')).version } catch { lastKnownVersion = -1 }
             lastWorkspaceSignature = workspaceSignature
             const pickerSessions = sessionIds
@@ -2292,55 +2115,6 @@ window.__ModuleLoader__.load({
       const openCardMenu = useCallback(card => setMenuCardId(card.id), [])
 
       // —— v0.2 图层动作：引用 / 材料增删 / 预览 ——
-      const doReference = useCallback(async (nodeId, title) => {
-        const active = synStore.get().activeSessionId
-        if (active == null) { synStore.set({ error: '没有活跃会话——先打开一个会话再引用' }); return }
-        const latest = latestNodeIdOf(synStore.get().graph, active)
-        if (latest == null) { synStore.set({ error: '当前会话还没有完成的轮次——先发一条消息再引用' }); return }
-        if (latest === nodeId) { synStore.set({ error: '当前轮就是生长点，引用自己没有意义' }); return }
-        try {
-          await api('/session-atlas/api/graph/edges', { method: 'POST', body: JSON.stringify({ from: nodeId, to: latest }) })
-          await api('/session-atlas/api/graph/arm-inject', { method: 'POST', body: JSON.stringify({ sessionId: active, fromNodeId: latest }) })
-          markGraphDirty()
-          const label = title != null && title !== '' ? `「${String(title).slice(0, 18)}」` : '该节点'
-          synStore.set({ refToast: `⎇ 已引用 ${label} · 随下一条消息生效一次` })
-          window.setTimeout(() => synStore.set({ refToast: '' }), 4500)
-        } catch (error) {
-          synStore.set({ error: error instanceof Error ? error.message : String(error) })
-        }
-      }, [])
-      const archiveMaterial = useCallback(async matId => {
-        try {
-          await api(`/session-atlas/api/graph/nodes/${encodeURIComponent(matId)}/archive`, { method: 'POST' })
-          markGraphDirty()
-        } catch (error) { synStore.set({ error: error instanceof Error ? error.message : String(error) }) }
-      }, [])
-      // Phase 3：过期轮的两个出路——按当前上下文重新问一轮 / 保留旧结果清除标记
-      const regenerateFromNode = useCallback(async (card, nodeId) => {
-        const sessionId = card.dshSessionId
-        if (sessionId == null) { synStore.set({ error: '这张卡不属于任何会话，无法重新生成' }); return }
-        try {
-          await api('/session-atlas/api/graph/arm-inject', { method: 'POST', body: JSON.stringify({ sessionId, fromNodeId: nodeId }) })
-          const session = scopeSession(moduleCtx, sessionId)
-          if (session === undefined) throw new Error('会话已不可用')
-          const question = String(card.question ?? '').slice(0, 200)
-          const result = await session.prompt([{ type: 'text', text: `（Synapse 重新生成）上游引用已变化。请基于刚注入的最新上下文，重新回答这一问题：「${question}」` }], 'queue')
-          if (!result.ok) throw new Error(result.error?.message ?? '发送失败')
-          markGraphDirty()
-          synStore.set({ refToast: '⎇ 已按当前上下文重新提问，回答开始后旧标记可清除' })
-          window.setTimeout(() => synStore.set({ refToast: '' }), 4500)
-        } catch (error) {
-          synStore.set({ error: error instanceof Error ? error.message : String(error) })
-        }
-      }, [])
-      const keepStaleResult = useCallback(async nodeId => {
-        try {
-          await api(`/session-atlas/api/graph/nodes/${encodeURIComponent(nodeId)}/refresh-stale`, { method: 'POST' })
-          markGraphDirty()
-          synStore.set({ refToast: '⎇ 已保留旧结果，过期标记清除' })
-          window.setTimeout(() => synStore.set({ refToast: '' }), 4500)
-        } catch (error) { synStore.set({ error: error instanceof Error ? error.message : String(error) }) }
-      }, [])
       const openCompare = useCallback(() => setCompareOpen(true), [])
       const openPicker = useCallback(() => synStore.set({ pickerOpen: true }), [])
       const toggleCompact = useCallback(() => synStore.set(st => ({ compact: st.compact !== true, userCompactToggled: true })), [])
@@ -2405,10 +2179,7 @@ window.__ModuleLoader__.load({
         : null
       if (syn.error !== '' && syn.error != null && syn.threads.length === 0 && !syn.stale) return h('div', { className: 'syn-root syn-root--pad syn-error', ref: synRootRef }, syn.error)
       // 空态但已打开新会话草稿 → 进画布长草稿卡（上游 empty-canvas + draft 的组合态）
-      // Phase 4：材料卡是全局可见节点。即使所选 workspace 当前没有会话卡，只要
-      // 过滤后的图里仍有未归档非 turn 节点，也必须进入画布渲染材料，不能被空态吞掉。
-      const hasGlobalGraphCards = syn.graph != null && Object.values(syn.graph.nodes ?? {}).some(node => node?.type !== 'turn' && node?.status !== 'archived')
-      if (syn.threads.length === 0 && !hasGlobalGraphCards && syn.newDraftOpen !== true) return h('div', { className: 'syn-root syn-root--pad', ref: synRootRef },
+      if (syn.threads.length === 0 && syn.newDraftOpen !== true) return h('div', { className: 'syn-root syn-root--pad', ref: synRootRef },
         h('div', { className: 'syn-empty' },
           h('strong', null, '地图默认只放当前会话'),
           h('p', null, '把工作区里的其他会话固定到地图上，或从当前会话长出分支。'),
@@ -2473,11 +2244,6 @@ window.__ModuleLoader__.load({
           onConfirmNewSession: createSession,
           onToggleExpand: toggleExpand,
           expandedNonce: syn.expandNonce ?? 0,
-          graph: syn.graph,
-          onReference: doReference,
-          onOpenRefPreview: () => synStore.set({ refPreviewOpen: true }),
-          onArchiveMaterial: archiveMaterial,
-          onOpenMatDraft: () => synStore.set({ matDraftOpen: true }),
           wsTitle: syn.wsTitle,
           syncing: syn.stale === true,
           onOpenProjectSheet: () => synStore.set({ projectSheetOpen: true }),
@@ -2493,42 +2259,6 @@ window.__ModuleLoader__.load({
         menuCard !== null ? h('div', { className: 'syn-sheet' },
           h('button', { onClick: () => { setMenuCardId(null); openDetail(menuCard) } }, '查看详情'),
           h('button', { onClick: () => { setMenuCardId(null); toggleBranchDraft(menuCard) } }, '从此轮创建分支'),
-          (() => {
-            // Phase 3：过期轮的两个出路。nodeId 解析带回退：goal_round 轮无直接卡，
-            // 与徽标同规则——找「指向该卡的 stale 节点」或直接映射。
-            const graph = synStore.get().graph
-            let nodeId = nodeIdForCard(menuCard, graph, synStore.get().threads)
-            if (nodeId == null || graph?.nodes?.[nodeId]?.status !== 'stale') {
-              // 回退：遍历 stale 节点，找 endpoint 解析后落在这张卡上的（最近 seq 距离）
-              const SID = menuCard.dshSessionId
-              if (graph != null && SID != null && Number.isInteger(menuCard.sourceSeq)) {
-                const candidates = Object.values(graph.nodes)
-                  .filter(n => n.status === 'stale' && n.sessionId === SID)
-                  .sort((a, b) => Math.abs(a.seq - menuCard.sourceSeq) - Math.abs(b.seq - menuCard.sourceSeq))
-                if (candidates[0] !== undefined && Math.abs(candidates[0].seq - menuCard.sourceSeq) < 20000) nodeId = candidates[0].id
-              }
-            }
-            if (nodeId == null || graph?.nodes?.[nodeId]?.status !== 'stale') return null
-            return h('fragment', null,
-              h('button', {
-                title: '把这一轮的当前引用重新注入，并向该会话重发一次提问',
-                onClick: () => { setMenuCardId(null); void regenerateFromNode(menuCard, nodeId) },
-              }, '⟳ 按当前上下文重新生成'),
-              h('button', {
-                title: '接受旧结果，清除过期标记（以当前上下文为新基准）',
-                onClick: () => { setMenuCardId(null); void keepStaleResult(nodeId) },
-              }, '✓ 保留旧结果，清除标记'),
-            )
-          })(),
-          h('button', {
-            title: '把这一轮的结论引用到当前会话——随你的下一条消息注入一次，不带它的历史包袱',
-            onClick: () => {
-              setMenuCardId(null)
-              const nid = nodeIdForCard(menuCard, synStore.get().graph, synStore.get().threads)
-              if (nid == null) { synStore.set({ error: '这张卡还没有对应的图节点（轮次未落库），稍等一两秒再试' }); return }
-              void doReference(nid, menuCard.question)
-            },
-          }, '⎇ 引用到当前会话'),
           menuCard.dshSessionId !== null && menuCard.dshSessionId !== syn.activeSessionId && syn.pinned.includes(menuCard.dshSessionId)
             ? h('button', { onClick: () => { setMenuCardId(null); removeSessionFromMap(menuCard.dshSessionId) } }, '从地图移除')
             : null,
@@ -2546,16 +2276,9 @@ window.__ModuleLoader__.load({
             title: item.title,
           }, item.title)),
         ) : null,
-        // v0.2 引用预览浮层：看「AI 将随下一条消息读到什么」+ 逐项摘除
-        syn.refPreviewOpen === true ? h('div', { className: 'syn-sheet-scrim', onClick: () => synStore.set({ refPreviewOpen: false }) }) : null,
-        syn.refPreviewOpen === true ? h(RefPreviewSheet, { sessionId: syn.activeSessionId }) : null,
-        // v0.2 材料创建浮层
-        syn.matDraftOpen === true ? h('div', { className: 'syn-sheet-scrim', onClick: () => synStore.set({ matDraftOpen: false }) }) : null,
-        syn.matDraftOpen === true ? h(MatDraftSheet) : null,
         // Phase 4 D3：项目切换浮层（官方工作区只读）
         syn.projectSheetOpen === true ? h('div', { className: 'syn-sheet-scrim', onClick: () => synStore.set({ projectSheetOpen: false }) }) : null,
         syn.projectSheetOpen === true ? h(ProjectSheet) : null,
-        syn.refToast !== '' ? h('div', { className: 'syn-reftoast', role: 'status' }, syn.refToast) : null,
       )
     }
 
@@ -2589,89 +2312,6 @@ window.__ModuleLoader__.load({
       )
     }
 
-    /** v0.2：引用预览——编译当前生长点上下文，展示清单/指纹/预览，可逐项摘除引用。 */
-    function RefPreviewSheet({ sessionId }) {
-      const [state, setState] = useState({ loading: true })
-      const reload = useCallback(async () => {
-        const graph = synStore.get().graph
-        const latest = latestNodeIdOf(graph, sessionId)
-        if (latest == null) { setState({ loading: false, error: '当前会话还没有完成的轮次' }); return }
-        try {
-          const body = await api(`/session-atlas/api/graph/context/${encodeURIComponent(latest)}`)
-          setState({ loading: false, latest, manifest: body.manifest, preview: body.preview ?? '', edges: (body.manifest?.sourceNodeIds ?? []) })
-        } catch (error) { setState({ loading: false, error: error instanceof Error ? error.message : String(error) }) }
-      }, [sessionId])
-      useEffect(() => { void reload() }, [reload])
-      const syn = useSyn()
-      const removeRef = async edgeId => {
-        try {
-          await api(`/session-atlas/api/graph/edges/${encodeURIComponent(edgeId)}`, { method: 'DELETE' })
-          markGraphDirty()
-          await reload()
-        } catch (error) { synStore.set({ error: error instanceof Error ? error.message : String(error) }) }
-      }
-      const refEdges = useMemo(() => {
-        if (syn.graph == null || state.latest == null) return []
-        return Object.values(syn.graph.edges).filter(e => e.mode === 'reference' && e.to === state.latest)
-      }, [syn.graphNonce, state.latest])
-      return h('div', { className: 'syn-sheet syn-sheet--refpreview' },
-        h('div', { className: 'syn-sheet__title' }, '引用预览 · 下一条消息将注入'),
-        state.loading === true ? h('div', { className: 'syn-sheet__hint' }, '编译中…') : null,
-        state.error != null ? h('div', { className: 'syn-sheet__hint' }, state.error) : null,
-        state.manifest != null ? h('div', { className: 'syn-refpreview__meta' },
-          `指纹 ${String(state.manifest.fingerprint ?? '').slice(0, 12)} · 约 ${state.manifest.estimatedTokens ?? 0} tokens · 对话 ${state.manifest.conversation.length} 轮 / 引用 ${state.manifest.references.length} 项 / 材料 ${state.manifest.materials.length} 项`,
-        ) : null,
-        refEdges.length > 0 ? h('div', { className: 'syn-refpreview__edges' },
-          refEdges.map(edge => {
-            const node = syn.graph?.nodes?.[edge.from]
-            return h('button', {
-              key: edge.id, className: 'syn-refpreview__edge', title: '摘除这条引用',
-              onClick: () => void removeRef(edge.id),
-            }, `⎇ ${(node?.title ?? edge.from).slice(0, 30)} ×`)
-          }),
-        ) : h('div', { className: 'syn-sheet__hint' }, '当前没有待生效的引用'),
-        state.preview !== '' ? h('pre', { className: 'syn-refpreview__pre' }, state.preview) : null,
-        h('button', { onClick: () => synStore.set({ refPreviewOpen: false }) }, '关闭'),
-      )
-    }
-
-    /** v0.2：材料创建——标题 + 正文 → 图节点 → 上画布。 */
-    function MatDraftSheet() {
-      const [title, setTitle] = useState('')
-      const [content, setContent] = useState('')
-      const [busy, setBusy] = useState(false)
-      const create = async () => {
-        if (busy || title.trim() === '') return
-        setBusy(true)
-        try {
-          await api('/session-atlas/api/graph/nodes', { method: 'POST', body: JSON.stringify({ type: 'material', title: title.trim(), content }) })
-          markGraphDirty()
-          synStore.set({ matDraftOpen: false, refToast: '⎇ 材料已上画布 · 点它的「引用」挂到当前会话' })
-          window.setTimeout(() => synStore.set({ refToast: '' }), 4500)
-        } catch (error) {
-          synStore.set({ error: error instanceof Error ? error.message : String(error) })
-          setBusy(false)
-        }
-      }
-      return h('form', {
-        className: 'syn-sheet', onClick: e => e.stopPropagation(),
-        onSubmit: e => { e.preventDefault(); void create() },
-      },
-        h('div', { className: 'syn-sheet__title' }, '添加材料卡片'),
-        h('input', {
-          className: 'syn-matdraft__input', placeholder: '材料标题（如：课堂录音摘要）', value: title,
-          maxLength: 200, onChange: e => setTitle(e.target.value), autoFocus: true,
-        }),
-        h('textarea', {
-          className: 'syn-matdraft__area', placeholder: '材料正文——引用时 AI 只读这份内容本身',
-          rows: 5, maxLength: 20000, value: content, onChange: e => setContent(e.target.value),
-        }),
-        h('div', { className: 'syn-matdraft__bar' },
-          h('button', { type: 'button', onClick: () => synStore.set({ matDraftOpen: false }) }, '取消'),
-          h('button', { type: 'submit', className: 'syn-controls__primary', disabled: busy || title.trim() === '' }, busy ? '创建中…' : '创建材料卡'),
-        ),
-      )
-    }
 
     // ---- 详情视图（M4）：消息流 + composer，直调 ctx.sessions ----
     const scopeSession = (ctx, sessionId) => {
@@ -3620,27 +3260,7 @@ body[data-ds-dark-theme] .syn-connector-dot{fill:rgba(226,232,240,.45)}
 @keyframes syn-sync{0%,100%{opacity:.25}50%{opacity:.95}}
 /* 缩放组视觉分组（P1-4） */
 .syn-controls__zoomgroup{display:inline-flex;align-items:center;gap:2px;padding-left:6px;margin-left:2px;border-left:1px solid var(--dsw-alias-border-l2)}
-/* Phase 2/3 图层样式（迁址生效） */
-.syn-connector--ref{stroke:#0f766e;stroke-dasharray:6 5;stroke-width:1.6}
-body[data-ds-dark-theme] .syn-connector--ref{stroke:#2dd4bf}
-.syn-card--mat{border-style:dashed;min-height:0}
-.syn-chip--mat{background:rgba(15,118,110,.12);color:#0f766e}
-.syn-card__matbody{margin:6px 12px 4px;font-size:12.5px;line-height:1.55;color:var(--dsw-alias-label-secondary);white-space:pre-wrap;word-break:break-word;max-height:96px;overflow:hidden}
-.syn-card__btn--ref{color:#0f766e}
-.syn-refbar{position:absolute;top:calc(8px + 48px + env(safe-area-inset-top,0px));left:12px;z-index:6;display:inline-flex;align-items:center;gap:6px;padding:5px 12px;font-size:12.5px;color:#0f766e;background:var(--dsw-alias-button-elevated-fill);border:1px solid rgba(15,118,110,.35);border-radius:999px;box-shadow:0 2px 10px rgba(0,0,0,.08);cursor:pointer}
-.syn-refbar__icon{font-weight:600}
-.syn-reftoast{position:absolute;left:50%;bottom:18px;transform:translateX(-50%);z-index:30;padding:8px 16px;font-size:13px;color:#fff;background:#0f766e;border-radius:10px;box-shadow:0 4px 16px rgba(0,0,0,.18);pointer-events:none}
-.syn-sheet--refpreview{max-width:560px}
-.syn-refpreview__meta{font-size:12.5px;color:var(--dsw-alias-label-secondary);margin-bottom:8px}
-.syn-refpreview__edges{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px}
-.syn-refpreview__edge{padding:4px 10px;font-size:12.5px;color:#0f766e;background:rgba(15,118,110,.1);border:1px solid rgba(15,118,110,.3);border-radius:999px;cursor:pointer}
-.syn-refpreview__pre{max-height:40vh;overflow:auto;margin:8px 0;padding:10px 12px;font-size:12px;line-height:1.6;white-space:pre-wrap;word-break:break-word;background:var(--dsw-alias-interactive-bg-hover);border:1px solid var(--dsw-alias-border-l1);border-radius:10px}
-.syn-matdraft__input,.syn-matdraft__area{width:100%;margin-top:8px;padding:8px 10px;font:inherit;font-size:13.5px;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-interactive-bg-hover);border:1px solid var(--dsw-alias-border-l2);border-radius:8px}
-.syn-matdraft__area{resize:vertical}
-.syn-matdraft__bar{display:flex;justify-content:flex-end;gap:8px;margin-top:10px}
 .syn-project__on{font-weight:700}
-/* Phase 3 过期徽标（迁址生效） */
-.syn-card__stale{padding:0 6px;font-size:11px;font-weight:600;color:#b45309;background:rgba(180,83,9,.1);border:1px solid rgba(180,83,9,.3);border-radius:6px;cursor:help}
 
 /* 0.9 v2 事件流（展开态）：assistant 段序列 + 每段工具过程 */
 .syn-card__eventflow{display:flex;flex-direction:column;gap:10px}
@@ -3683,7 +3303,6 @@ body[data-ds-dark-theme] .syn-msg--error .syn-msg__body{color:#f97066}
   .syn-controls .syn-controls__zoomlabel{min-height:44px}
   .syn-controls .syn-controls__project{min-height:44px}
   .syn-card__foot button,.syn-card__btn,.syn-card__expand{min-height:44px}
-  .syn-refbar{min-height:44px}
   .syn-collapse-chip{min-height:44px}
   .syn-focuschip{min-height:44px}
 }

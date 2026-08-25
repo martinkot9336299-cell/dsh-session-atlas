@@ -85,13 +85,6 @@ test('fuse follow-scroll 不搬：卡片无自动滚动注入', () => {
   assert.ok(!src.includes('scrollIntoView'), '视图代码无滚动劫持')
 })
 
-test('fuse 图层锚点不变', () => {
-  const core = readFileSync(new URL('../graph/core.mjs', import.meta.url), 'utf8')
-  assert.match(core, /export function stalenessDecisions/)
-  assert.match(core, /export function filterGraphByWorkspace/)
-  assert.match(core, /export function compileContext/)
-})
-
 
 test('fuse runtime adapter：null-safe adopt，不因模块缺失二次抛错', () => {
   assert.match(src, /mod != null && \(typeof mod\.MarkdownText === 'object' \|\| typeof mod\.MarkdownText === 'function'\)/)

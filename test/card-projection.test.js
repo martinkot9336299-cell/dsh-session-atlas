@@ -159,15 +159,6 @@ test('源码：详情视图渲染 todo/error 状态行', () => {
   assert.match(clientSrc, /'⚠ 失败' : '☰ 任务'/)
 })
 
-test('源码：Graph/Project/Staleness 锚点不变', () => {
-  const core = readFileSync(new URL('../graph/core.mjs', import.meta.url), 'utf8')
-  assert.match(core, /export function stalenessDecisions/)
-  assert.match(core, /export function filterGraphByWorkspace/)
-  assert.match(core, /export function compileContext/)
-  assert.match(hostSrc, /agent\/pre-step/)
-  assert.match(hostSrc, /workspaceId/)
-})
-
 test('0.11 AI 正文不泄漏工具协议：tool-call/tool-result 只进 process，不进 message text', () => {
   const start = hostSrc.indexOf('function contentMessageText')
   const end = hostSrc.indexOf('/** Tool result payload extractor', start)
