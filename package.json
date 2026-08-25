@@ -1,0 +1,54 @@
+{
+  "name": "dsh-session-atlas",
+  "version": "0.1.0",
+  "description": "会话地图 for DeepSeek Harness — non-linear conversation map: one complete turn per card, branchable DAG, docked turn inspector, live growth, upstream-parity rendering. Extracted from the dsh-synapse lineage.",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE",
+    "graph/core.mjs",
+    "graph/facts.mjs",
+    "graph/store.mjs"
+  ],
+  "scripts": {
+    "build": "node --check index.js && node --check client.js",
+    "prepare": "pnpm run build",
+    "test": "node --test test/*.test.js"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "peerDependencies": {
+    "dsh-better-sidebar": ">=0.12.0"
+  },
+  "peerDependenciesMeta": {
+    "dsh-better-sidebar": {
+      "optional": true
+    }
+  },
+  "license": "MIT",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-primitives",
+        "@deepseek-ai/dsh-client-ui-attachment"
+      ],
+      "immediately": false
+    }
+  }
+}
